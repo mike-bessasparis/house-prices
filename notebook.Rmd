@@ -1,0 +1,204 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Loading and Exploring Data
+```{r results = "hide"}
+
+library(tidyverse)
+library(corrplot)
+library(readr)
+library(ggthemes)
+library(ggrepel)
+
+train_set <- read_csv("./data/train.csv")
+
+df <- train_set
+
+str(df)
+
+```
+
+# Explore some of the most imporant variables
+## Response Variable: SalePrice
+``` {r}
+
+df %>% ggplot(aes(x=Id, y=SalePrice)) +
+  geom_point() +
+  theme_economist_white()
+
+df %>% ggplot(aes(x=SalePrice)) +
+  geom_histogram(binwidth = 10000, col="grey") +
+  theme_economist_white()
+
+df %>% ggplot(aes(sample=SalePrice)) +
+  geom_qq() +
+  geom_qq_line() +
+  theme_economist_white()
+
+summary(df$SalePrice)
+
+```
+## Numerical Predictors
+```{r}
+
+numPreds <- df %>% 
+  select_if(is.numeric)
+
+cat("Numeric predictors:", length(numPreds))
+
+```
+### Correlations with SalePrice
+```{r}
+
+cor_numPreds <- numPreds %>% 
+  cor(use="pairwise.complete.obs")
+
+# sort the matrix by cor with SalePrice
+cor_sorted <- as.matrix(sort(cor_numPreds[,'SalePrice'], decreasing = TRUE))
+
+# select those with > .5 cor with SalePrice
+cor_high <- names(which(apply(cor_sorted, 1, function(x) abs(x)>0.5)))
+cor_numPreds <- cor_numPreds[cor_high, cor_high]
+
+corrplot.mixed(cor_numPreds, tl.col="black", tl.pos = "lt")
+
+```
+In the remainder of this section, we visualize the relation between SalePrice and the two predictors with the highest correlation with SalePrice: Overall Quality and the ‘Above Grade’ Living Area.
+
+Multicollinearity is an issue. For example, the correlation between GarageCars and GarageArea is very high (0.88), and both have similar correlations with SalePrice (0.64, 0.62). The other 6 six variables with a correlation higher than 0.5 with SalePrice are: 
+
+- TotalBsmtSF: Total square feet of basement area 
+- 1stFlrSF: First Floor square feet 
+- FullBath: Full bathrooms above grade 
+- TotRmsAbvGrd: Total rooms above grade (does not include bathrooms) 
+- YearBuilt: Original construction date 
+- YearRemodAdd: Remodel date (same as construction date if no remodeling or additions)
+
+### Overall Quality
+Overall Quality has the highest correlation with SalePrice among the numeric variables (0.79). It rates the overall material and finish of the house on a scale from 1 (very poor) to 10 (very excellent).
+```{r}
+
+df %>% ggplot() +
+  geom_boxplot(aes(x=factor(OverallQual), y=SalePrice)) + 
+  labs(x='Overall Quality') +
+  theme_economist_white()
+
+```
+<br>
+
+### Above Grade (Ground) Living Area (square feet)
+```{r}
+
+df %>% ggplot(aes(x=GrLivArea, y=SalePrice)) +
+  geom_point(color = "blue") + 
+  geom_text_repel(aes(label = ifelse(GrLivArea > 4500, Id, "")), position = "nudge") +
+  theme_economist_white()
+
+```
+The two houses with large living areas and low SalePrices seem to be outliers (houses 524 and 1299, see labels in graph). I will not take them out yet, as removing outliers can be dangerous. For instance, a low score on the Overall Quality could explain a low price. However, as you can see below, these two houses score maximum points on Overall Quality. Therefore, I will keep houses 1299 and 524 in mind as prime candidates to remove as outliers.
+
+```{r}
+
+df[c(524, 1299), c("Id", "SalePrice", "GrLivArea", "OverallQual")]
+
+```
+
+## Missing data, label encoding, and factorizing variables
+### Completeness
+First of all, I would like to see which variables contain missing values.
+```{r}
+
+NAcol <- which(colSums(is.na(df)) > 0)
+sort(colSums(sapply(df[NAcol], is.na)), decreasing = TRUE)
+cat("There are", length(NAcol), "predictors with NA.")
+
+```
+
+### Imputing missing data
+```{r}
+
+df$PoolQC <- df$PoolQC %>% replace_na("None")
+
+df$MiscFeature <- df$MiscFeature %>% replace_na("None")
+
+df$Alley <- df$Alley %>% replace_na("None")
+
+df$Fence <- df$Fence %>% replace_na("None")
+
+df$FireplaceQu <- df$FireplaceQu %>% replace_na("None")
+
+#
+# replace missing LotFrontages with median of the neighborhood
+#
+for (i in 1:nrow(df)) {
+        if(is.na(df$LotFrontage[i])) {
+               df$LotFrontage[i] <- as.integer(median(df$LotFrontage[df$Neighborhood == df$Neighborhood[i]], na.rm=TRUE)) 
+        }
+}
+
+
+```
+
+
+
+```{r}
+
+library(factoextra)
+library(FactoMineR)
+
+df <- readRDS("./rda/df.rds") %>% select(-SalePrice, -trans_SalePrice, -Id) %>% select_if(is.numeric)
+
+
+df.pca <- PCA(df)
+var <- get_pca_var(df.pca)
+head(var$contrib, 6)
+fviz_contrib(df.pca, choice = "var", axes = 1:2, top = 10)
+
+q <- c("2ndFlrSF", "TotRmsAbvGrd", "GrLivArea", "OverallQual", "GarageArea", "TotalBsmtSF")
+df <- readRDS("./rda/df.rds") %>% select(q, SalePrice, trans_SalePrice, Id)
+saveRDS(df, file="./rda/mjb1.rds")
+
+
+
+```
+
+```{r}
+library(caret)
+
+df <- readRDS("./rda/mjb1.rds")
+
+set.seed(1)
+test_index <- createDataPartition(df$trans_SalePrice, times = 1, p = 0.2, list = FALSE)
+train_set <- df %>% slice(-test_index)
+test_set <- df %>% slice(test_index)
+
+
+```
+
+```{r}
+
+library(randomForest)
+library(Rborist)
+
+fit <- train(trans_SalePrice ~ GrLivArea + TotRmsAbvGrd + `2ndFlrSF` + OverallQual, 
+             data=train_set, method="Rborist")
+
+summary(fit)
+
+y_hat <- data.frame(Id=test_set$Id, SalePrice_pred = exp(predict(fit, test_set)), SalePrice = test_set$SalePrice)
+
+RMSE(log(y_hat$SalePrice_pred), log(test_set$SalePrice))
+
+
+y_hat %>% ggplot() +
+  geom_point(aes(x = Id, y = SalePrice)) +
+  geom_point(aes(x = Id, y = SalePrice_pred), col="red") +
+  geom_linerange(aes(x = Id, ymax = SalePrice_pred, ymin = SalePrice)) 
+
+
+
+
+```
+
